@@ -126,6 +126,17 @@ func (r *HarborProjectReconciler) reconcileCreate(ctx context.Context, project *
 		project.Status.HarborProjectName = hbProject.Name
 	}
 
+	// Clean up any existing robot account before creating a new one.
+	// This avoids leaking robots when the spec changes (e.g., owner label change).
+	if project.Status.RobotID > 0 {
+		logger.V(1).Info("removing previous robot account before re-creation",
+			"robotID", project.Status.RobotID)
+		if err := r.HarborClient.DeleteProjectRobot(ctx, project.Status.HarborProjectID, project.Status.RobotID); err != nil {
+			// Log but don't fail — the robot might already be gone.
+			logger.Error(err, "failed to delete previous robot (continuing)", "robotID", project.Status.RobotID)
+		}
+	}
+
 	// Phase 1: Create a single shared Robot Account for all namespaces.
 	// Future: create per-namespace robots with different permissions when needed.
 	robot, err := r.HarborClient.CreateRobot(ctx, project.Status.HarborProjectID, harbor.RobotSpec{

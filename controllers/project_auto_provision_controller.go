@@ -24,6 +24,13 @@ const (
 	// SourceNamespaceLabel records the namespace from which the HarborProject
 	// was auto-provisioned.
 	SourceNamespaceLabel = "harbor.sealos.io/source-namespace"
+
+	// SourceNamespaceUIDLabel records the UID of the namespace at the time of
+	// auto-provisioning. This is used to detect namespace recreation: if the
+	// namespace is deleted and recreated with the same name but a different UID,
+	// the controller will fully adopt the new namespace rather than treating the
+	// existing HarborProject CR as stale.
+	SourceNamespaceUIDLabel = "harbor.sealos.io/source-namespace-uid"
 )
 
 // ProjectAutoProvisionReconciler watches Namespace resources and automatically
@@ -74,8 +81,9 @@ func (r *ProjectAutoProvisionReconciler) Reconcile(ctx context.Context, req ctrl
 		ObjectMeta: metav1.ObjectMeta{
 			Name: hpName,
 			Labels: map[string]string{
-				AutoProvisionLabel:   "true",
-				SourceNamespaceLabel: ns.Name,
+				AutoProvisionLabel:    "true",
+				SourceNamespaceLabel:  ns.Name,
+				SourceNamespaceUIDLabel: string(ns.UID),
 			},
 		},
 		Spec: v1.HarborProjectSpec{
@@ -110,7 +118,8 @@ func (r *ProjectAutoProvisionReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 
 	// 5. Adopt/update existing CR
-	//    Only update if the spec actually differs to avoid unnecessary writes.
+	//    Check if the namespace was deleted and recreated (different UID).
+	//    If so, we still adopt it — the CR exists and we update spec+labels.
 	if needsUpdate(existing, desired) {
 		logger.Info("updating auto-provisioned HarborProject",
 			"namespace", ns.Name,
@@ -119,7 +128,7 @@ func (r *ProjectAutoProvisionReconciler) Reconcile(ctx context.Context, req ctrl
 		)
 		updated := existing.DeepCopy()
 		updated.Spec = desired.Spec
-		// Merge labels, preserving any existing ones
+		// Merge labels, preserving any existing ones but overwriting our managed labels
 		if updated.Labels == nil {
 			updated.Labels = make(map[string]string)
 		}
@@ -142,9 +151,11 @@ func (r *ProjectAutoProvisionReconciler) SetupWithManager(mgr ctrl.Manager) erro
 		Complete(r)
 }
 
-// needsUpdate compares the spec-relevant fields of an existing HarborProject
-// against the desired one. It returns true if an update is needed.
+// needsUpdate compares the spec-relevant fields and managed labels of an
+// existing HarborProject against the desired one. It returns true if an
+// update is needed.
 func needsUpdate(existing, desired *v1.HarborProject) bool {
+	// Compare spec fields
 	if existing.Spec.Owner != desired.Spec.Owner {
 		return true
 	}
@@ -163,6 +174,19 @@ func needsUpdate(existing, desired *v1.HarborProject) bool {
 	if !robotPermissionsEqual(existing.Spec.RobotPermissions, desired.Spec.RobotPermissions) {
 		return true
 	}
+
+	// Compare managed labels (auto-provision labels should be present on
+	// existing CRs that were adopted or created by this controller)
+	if existing.Labels[AutoProvisionLabel] != desired.Labels[AutoProvisionLabel] {
+		return true
+	}
+	if existing.Labels[SourceNamespaceLabel] != desired.Labels[SourceNamespaceLabel] {
+		return true
+	}
+	if existing.Labels[SourceNamespaceUIDLabel] != desired.Labels[SourceNamespaceUIDLabel] {
+		return true
+	}
+
 	return false
 }
 

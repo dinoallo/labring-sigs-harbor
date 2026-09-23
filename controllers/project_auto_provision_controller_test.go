@@ -36,6 +36,7 @@ func ns(name string, labels map[string]string) *corev1.Namespace {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   name,
 			Labels: labels,
+			UID:    types.UID(name + "-uid"),
 		},
 	}
 }
@@ -45,8 +46,9 @@ func hp(name, owner, namespace string) *v1.HarborProject {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 			Labels: map[string]string{
-				AutoProvisionLabel:   "true",
-				SourceNamespaceLabel: namespace,
+				AutoProvisionLabel:      "true",
+				SourceNamespaceLabel:    namespace,
+				SourceNamespaceUIDLabel: namespace + "-uid",
 			},
 		},
 		Spec: v1.HarborProjectSpec{
@@ -107,6 +109,9 @@ func TestAutoProvision_Namespace_WithLabel_CreatesHarborProject(t *testing.T) {
 	}
 	if hpObj.Labels[SourceNamespaceLabel] != "ns-1" {
 		t.Errorf("expected label %s=ns-1", SourceNamespaceLabel)
+	}
+	if hpObj.Labels[SourceNamespaceUIDLabel] == "" {
+		t.Errorf("expected label %s to be set", SourceNamespaceUIDLabel)
 	}
 }
 
@@ -341,5 +346,64 @@ func TestAutoProvision_AdoptsExistingHP_WithWrongSpec(t *testing.T) {
 	// Verify auto-provision labels are added
 	if after.Labels[AutoProvisionLabel] != "true" {
 		t.Errorf("expected auto-provision label to be added")
+	}
+	if after.Labels[SourceNamespaceLabel] != "ns-8" {
+		t.Errorf("expected label %s=ns-8, got %q", SourceNamespaceLabel, after.Labels[SourceNamespaceLabel])
+	}
+	if after.Labels[SourceNamespaceUIDLabel] == "" {
+		t.Errorf("expected label %s to be set", SourceNamespaceUIDLabel)
+	}
+}
+
+
+func TestAutoProvision_ExistingHP_MissingLabels_TriggersUpdate(t *testing.T) {
+	ownerLabelKey := "user.sealos.io/owner"
+	nsObj := ns("ns-9", map[string]string{ownerLabelKey: "user-abc"})
+
+	// Existing CR that has matching spec but is missing auto-provision labels
+	existingHP := &v1.HarborProject{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "hp-ns-9",
+			Labels: map[string]string{
+				"some-other-label": "val",
+			},
+		},
+		Spec: v1.HarborProjectSpec{
+			Owner:        "user-abc",
+			NamespaceRefs: []string{"ns-9"},
+			StorageLimit:  5 * 1024 * 1024 * 1024,
+			Public:        false,
+			AutoScan:      false,
+			RobotPermissions: []v1.RobotPermission{
+				{Action: "push"},
+				{Action: "pull"},
+			},
+		},
+	}
+
+	r := newAutoProvisionReconciler(ownerLabelKey, nsObj, existingHP)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "ns-9"}}
+
+	result, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Requeue {
+		t.Fatal("expected no requeue")
+	}
+
+	// Verify the HP was updated with labels
+	after := &v1.HarborProject{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "hp-ns-9"}, after); err != nil {
+		t.Fatalf("failed to get HP: %v", err)
+	}
+	if after.Labels[AutoProvisionLabel] != "true" {
+		t.Errorf("expected label %s=true, got %q", AutoProvisionLabel, after.Labels[AutoProvisionLabel])
+	}
+	if after.Labels[SourceNamespaceLabel] != "ns-9" {
+		t.Errorf("expected label %s=ns-9, got %q", SourceNamespaceLabel, after.Labels[SourceNamespaceLabel])
+	}
+	if after.Labels[SourceNamespaceUIDLabel] == "" {
+		t.Errorf("expected label %s to be set", SourceNamespaceUIDLabel)
 	}
 }

@@ -12,7 +12,7 @@ metadata:
 rules:
   - apiGroups: ["harbor.sealos.io"]
     resources: ["harborprojects"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
   - apiGroups: ["harbor.sealos.io"]
     resources: ["harborprojects/status"]
     verbs: ["get", "update", "patch"]
