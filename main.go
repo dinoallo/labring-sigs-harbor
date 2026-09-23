@@ -34,11 +34,18 @@ func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
 	var probeAddr string
+	var enableProjectAutoProvision bool
+	var ownerLabelKey string
+
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
+	flag.BoolVar(&enableProjectAutoProvision, "enable-project-auto-provision", false,
+		"Enable automatic creation of HarborProject CRs for namespaces that carry the owner label key.")
+	flag.StringVar(&ownerLabelKey, "owner-label-key", "user.sealos.io/owner",
+		"Label key on namespaces used to determine the owner for auto-provisioned HarborProject CRs.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -85,6 +92,20 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "HarborProject")
 		os.Exit(1)
+	}
+
+	if enableProjectAutoProvision {
+		setupLog.Info("project auto-provision enabled",
+			"ownerLabelKey", ownerLabelKey,
+		)
+		if err = (&controllers.ProjectAutoProvisionReconciler{
+			Client:        mgr.GetClient(),
+			Scheme:        mgr.GetScheme(),
+			OwnerLabelKey: ownerLabelKey,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "ProjectAutoProvision")
+			os.Exit(1)
+		}
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
