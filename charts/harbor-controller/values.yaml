@@ -43,6 +43,16 @@ harbor:
     key: "password"
   registryHost: "registry.sealos.io"
 
+# ProjectAutoProvision settings
+# When enabled, the controller watches namespaces and automatically creates
+# a HarborProject CR for every namespace that carries the configured owner label.
+autoProvision:
+  # Whether to enable the ProjectAutoProvision controller
+  enabled: false
+  # Label key on namespaces used to determine the owner for auto-provisioned
+  # HarborProject CRs.
+  ownerLabelKey: "user.sealos.io/owner"
+
 # Controller command-line arguments
 controllerArgs: []
 

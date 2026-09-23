@@ -24,6 +24,8 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - --leader-elect
+            - --enable-project-auto-provision
+            - --owner-label-key=user.sealos.io/owner
           env:
             - name: HARBOR_ENDPOINT
               value: "https://core.harbor.svc:8443"
