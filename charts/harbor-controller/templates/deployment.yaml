@@ -42,6 +42,10 @@ spec:
             {{- if .Values.metrics.bindAddress }}
             - --metrics-bind-address={{ .Values.metrics.bindAddress }}
             {{- end }}
+            {{- if .Values.autoProvision.enabled }}
+            - --enable-project-auto-provision
+            - --owner-label-key={{ .Values.autoProvision.ownerLabelKey }}
+            {{- end }}
             {{- range .Values.controllerArgs }}
             {{- if and $.Values.leaderElection.enabled (eq . "--leader-elect") }}{{- else }}
             - {{ . }}
