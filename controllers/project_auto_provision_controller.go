@@ -81,13 +81,14 @@ func (r *ProjectAutoProvisionReconciler) Reconcile(ctx context.Context, req ctrl
 		ObjectMeta: metav1.ObjectMeta{
 			Name: hpName,
 			Labels: map[string]string{
-				AutoProvisionLabel:    "true",
-				SourceNamespaceLabel:  ns.Name,
+				AutoProvisionLabel:      "true",
+				SourceNamespaceLabel:    ns.Name,
 				SourceNamespaceUIDLabel: string(ns.UID),
 			},
 		},
 		Spec: v1.HarborProjectSpec{
-			Owner:        owner,
+			Owner:         owner,
+			ProjectName:   ns.Name,
 			NamespaceRefs: []string{ns.Name},
 			StorageLimit:  5 * 1024 * 1024 * 1024, // 5 GB
 			Public:        false,
@@ -127,7 +128,15 @@ func (r *ProjectAutoProvisionReconciler) Reconcile(ctx context.Context, req ctrl
 			"owner", owner,
 		)
 		updated := existing.DeepCopy()
-		updated.Spec = desired.Spec
+		// Only update fields managed by this controller; preserve unmanaged
+		// fields such as DisplayName and any future additions.
+		updated.Spec.Owner = desired.Spec.Owner
+		updated.Spec.ProjectName = desired.Spec.ProjectName
+		updated.Spec.NamespaceRefs = desired.Spec.NamespaceRefs
+		updated.Spec.StorageLimit = desired.Spec.StorageLimit
+		updated.Spec.Public = desired.Spec.Public
+		updated.Spec.AutoScan = desired.Spec.AutoScan
+		updated.Spec.RobotPermissions = desired.Spec.RobotPermissions
 		// Merge labels, preserving any existing ones but overwriting our managed labels
 		if updated.Labels == nil {
 			updated.Labels = make(map[string]string)
@@ -157,6 +166,9 @@ func (r *ProjectAutoProvisionReconciler) SetupWithManager(mgr ctrl.Manager) erro
 func needsUpdate(existing, desired *v1.HarborProject) bool {
 	// Compare spec fields
 	if existing.Spec.Owner != desired.Spec.Owner {
+		return true
+	}
+	if existing.Spec.ProjectName != desired.Spec.ProjectName {
 		return true
 	}
 	if existing.Spec.Public != desired.Spec.Public {

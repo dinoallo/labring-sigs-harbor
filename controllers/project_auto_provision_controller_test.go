@@ -52,7 +52,8 @@ func hp(name, owner, namespace string) *v1.HarborProject {
 			},
 		},
 		Spec: v1.HarborProjectSpec{
-			Owner:        owner,
+			Owner:         owner,
+			ProjectName:   namespace,
 			NamespaceRefs: []string{namespace},
 			StorageLimit:  5 * 1024 * 1024 * 1024,
 			Public:        false,
@@ -290,7 +291,6 @@ func TestAutoProvision_NamespaceNotFound_NoError(t *testing.T) {
 	}
 }
 
-
 func TestAutoProvision_AdoptsExistingHP_WithWrongSpec(t *testing.T) {
 	ownerLabelKey := "user.sealos.io/owner"
 	nsObj := ns("ns-8", map[string]string{ownerLabelKey: "user-abc"})
@@ -304,7 +304,7 @@ func TestAutoProvision_AdoptsExistingHP_WithWrongSpec(t *testing.T) {
 			},
 		},
 		Spec: v1.HarborProjectSpec{
-			Owner:        "user-manual",
+			Owner:         "user-manual",
 			NamespaceRefs: []string{"other-ns"},
 			StorageLimit:  -1,
 			Public:        true,
@@ -355,7 +355,6 @@ func TestAutoProvision_AdoptsExistingHP_WithWrongSpec(t *testing.T) {
 	}
 }
 
-
 func TestAutoProvision_ExistingHP_MissingLabels_TriggersUpdate(t *testing.T) {
 	ownerLabelKey := "user.sealos.io/owner"
 	nsObj := ns("ns-9", map[string]string{ownerLabelKey: "user-abc"})
@@ -369,7 +368,7 @@ func TestAutoProvision_ExistingHP_MissingLabels_TriggersUpdate(t *testing.T) {
 			},
 		},
 		Spec: v1.HarborProjectSpec{
-			Owner:        "user-abc",
+			Owner:         "user-abc",
 			NamespaceRefs: []string{"ns-9"},
 			StorageLimit:  5 * 1024 * 1024 * 1024,
 			Public:        false,

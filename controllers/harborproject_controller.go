@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"net/http"
 
+	stderrors "errors"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	stderrors "errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -18,17 +18,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1 "github.com/dinoallo/labring-sigs-harbor/api/v1"
 	"github.com/dinoallo/labring-sigs-harbor/internal/harbor"
 )
 
 const (
-	harborFinalizer  = "harbor.sealos.io/cleanup"
+	harborFinalizer   = "harbor.sealos.io/cleanup"
 	refreshAnnotation = "harbor.sealos.io/refresh-token"
-	projectLabel     = "harbor.sealos.io/project"
+	projectLabel      = "harbor.sealos.io/project"
 )
 
 // HarborProjectReconciler reconciles a HarborProject object
@@ -126,16 +126,8 @@ func (r *HarborProjectReconciler) reconcileCreate(ctx context.Context, project *
 		project.Status.HarborProjectName = hbProject.Name
 	}
 
-	// Clean up any existing robot account before creating a new one.
-	// This avoids leaking robots when the spec changes (e.g., owner label change).
-	if project.Status.RobotID > 0 {
-		logger.V(1).Info("removing previous robot account before re-creation",
-			"robotID", project.Status.RobotID)
-		if err := r.HarborClient.DeleteProjectRobot(ctx, project.Status.HarborProjectID, project.Status.RobotID); err != nil {
-			// Log but don't fail — the robot might already be gone.
-			logger.Error(err, "failed to delete previous robot (continuing)", "robotID", project.Status.RobotID)
-		}
-	}
+	// Capture the previous robot ID before overwriting it with the new one.
+	oldRobotID := project.Status.RobotID
 
 	// Phase 1: Create a single shared Robot Account for all namespaces.
 	// Future: create per-namespace robots with different permissions when needed.
@@ -176,6 +168,18 @@ func (r *HarborProjectReconciler) reconcileCreate(ctx context.Context, project *
 					logger.Error(updateErr, "failed to update existing secret in namespace", "namespace", ns)
 				}
 			}
+		}
+	}
+
+	// Delete the previous robot account now that the replacement is durable.
+	// This follows the create -> update -> delete ordering used by the
+	// refresh path to avoid invalidating credentials on transient failures.
+	if oldRobotID > 0 {
+		logger.V(1).Info("removing previous robot account",
+			"robotID", oldRobotID)
+		if err := r.HarborClient.DeleteProjectRobot(ctx, project.Status.HarborProjectID, oldRobotID); err != nil {
+			// Log but don't fail — the robot might already be gone.
+			logger.Error(err, "failed to delete previous robot (continuing)", "robotID", oldRobotID)
 		}
 	}
 
@@ -294,10 +298,10 @@ func (r *HarborProjectReconciler) mapSecretToProject(ctx context.Context, obj cl
 }
 
 // reconcileRefreshToken performs a token rotation for the robot account:
-//   1. Create a new robot → get new token
-//   2. Update secrets in all namespaces with new credentials
-//   3. Delete the old robot by ID
-//   4. Update status and remove the refresh annotation
+//  1. Create a new robot → get new token
+//  2. Update secrets in all namespaces with new credentials
+//  3. Delete the old robot by ID
+//  4. Update status and remove the refresh annotation
 func (r *HarborProjectReconciler) reconcileRefreshToken(ctx context.Context, project *v1.HarborProject) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Refreshing robot token", "project", project.Name)
