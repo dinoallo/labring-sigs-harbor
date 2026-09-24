@@ -127,6 +127,7 @@ func handleProjects(w http.ResponseWriter, r *http.Request) {
 		all := make([]*project, 0, len(globalStore.projects))
 		for _, p := range globalStore.projects {
 			all = append(all, p)
+		}
 		globalStore.mu.Unlock()
 		writeJSON(w, http.StatusOK, all)
 
@@ -168,7 +169,7 @@ func handleProjectByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.Method {
-	case http.MethodPatch:
+	case http.MethodPut:
 		// PUT /api/v2.0/projects/{id} — update project metadata
 		var req struct {
 			StorageLimit int64                  `json:"storage_limit"`
@@ -277,7 +278,7 @@ func handleRobots(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleRobotByID handles DELETE and PUT /api/v2.0/robots/<robotID>
+// handleRobotByID handles DELETE and PATCH /api/v2.0/robots/<robotID>
 func handleRobotByID(w http.ResponseWriter, r *http.Request) {
 	robotID, ok := parseID(r.URL.Path)
 	if !ok || robotID == 0 {
@@ -321,7 +322,7 @@ func handleRobotByID(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusOK)
 
-	case http.MethodPut:
+	case http.MethodPatch:
 		// Refresh the robot secret (in-place update)
 		var req struct {
 			Secret string `json:"secret"`
