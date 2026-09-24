@@ -8,10 +8,16 @@ Bundled Harbor (minimal):
   - Portal, Trivy, Notary, ChartMuseum, Exporter → disabled
 
 The chart automatically creates the shared admin password Secret
-from .Values.harbor.adminPassword (default: "Harbor12345").
-Change it before installing or update it after deploy:
+from .Values.harbor.adminPassword (randomly generated if empty).
+Set a custom password during initial install:
 
-  helm upgrade --set harbor.adminPassword=<your-password>
+  helm install harbor-stack ./charts/harbor-stack \
+    --set harbor.enabled=true \
+    --set harbor.adminPassword=<your-password>
+
+To change the admin password after deployment, use Harbor's
+password-change API or UI first, then update the controller
+Secret and restart the controller pod.
 
 If you set .Values.harbor.databasePassword or .Values.harbor.redisPassword
 (plaintext), the chart will automatically create corresponding
