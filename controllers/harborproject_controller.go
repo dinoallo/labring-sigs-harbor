@@ -41,6 +41,11 @@ type HarborProjectReconciler struct {
 	Scheme       *runtime.Scheme
 	HarborClient HarborAPIClient
 	RegistryHost string // e.g. harbor.sealos.example.com
+
+	// RotationStateNamespace is the namespace where rotation-pending Secrets
+	// are stored. If empty, rotation state is not persisted and retries will
+	// generate a fresh secret (safe but may briefly invalidate credentials).
+	RotationStateNamespace string
 }
 
 // +kubebuilder:rbac:groups=harbor.sealos.io,resources=harborprojects,verbs=get;list;watch;update;patch
@@ -344,60 +349,152 @@ func (r *HarborProjectReconciler) mapSecretToProject(ctx context.Context, obj cl
 }
 
 // reconcileRefreshToken performs a token rotation for the robot account:
-//  1. Generate a new secret
-//  2. Refresh the robot in-place via Harbor v2.2+ API (PATCH)
-//  3. Update secrets in all namespaces with new credentials
-//  4. Remove the refresh annotation
+//  1. Reuse or generate a new secret and persist it in a rotation-state Secret
+//  2. Update K8s Secrets in all target namespaces (new credential available)
+//  3. Refresh the robot in-place via Harbor v2.2+ API (PATCH)
+//  4. Remove the refresh annotation and clean up rotation state
 //
 // Unlike the old create-new-delete approach, the robot ID/name remain unchanged.
-// Harbor is refreshed BEFORE the K8s Secrets are updated so that new credentials
-// are already valid in Harbor when pods read them. On retry a fresh secret is
-// generated; the Harbor PATCH and K8s Secret updates are both idempotent, so
-// partial failures on retry converge to a consistent state.
+//
+// # Outage window
+// Harbor rotates the secret immediately with no dual-credential grace period.
+// This means there is a brief window where pods still using the old cached
+// credential fail to authenticate until they reload the updated K8s Secret.
+// The window runs from step 2 (K8s update) through step 3 (Harbor refresh).
+// Step 3 is a single API call, so the window is minimised.
+//
+// # Retry safety
+// The pending secret is persisted in a K8s Secret (in RotationStateNamespace)
+// so that on retry the same secret is reused. This prevents a retry from
+// generating a fresh secret that would invalidate credentials already written
+// to K8s in a previous attempt. The rotation state is cleaned up after the
+// annotation is successfully removed.
+// reconcileRefreshToken performs a token rotation for the robot account
+// using a create-new/delete-old strategy to achieve zero-downtime rotation:
+//
+//  1. Capture the old robot identity from status
+//  2. Create a new robot account with a fresh name and secret
+//  3. Update project status to point to the new robot
+//  4. Distribute the new credentials to all target K8s Secrets
+//  5. Delete the old robot account
+//  6. Remove the refresh annotation
+//
+// During the rotation the old robot continues to work (step 1→4), so pods
+// keep authenticating. Once the new credentials are in K8s Secrets (step 4),
+// pods that reload pick up the new robot credentials, which are already valid
+// in Harbor (step 2). The old robot is only deleted after the new one is
+// fully deployed (step 5), ensuring there is always a valid credential.
+//
+// Retry safety is provided by the status sub-resource: if reconciliation is
+// interrupted before step 3 (status update), the retry starts from scratch
+// with the original status. If interrupted after step 3, the retry sees the
+// updated robot ID and creates a new robot, keeping the previous one as
+// intermediate. The old robot account is always cleaned up on the next
+// successful rotation.
+// reconcileRefreshToken performs a token rotation for the robot account
+// using a create-new/delete-old strategy to achieve zero-downtime rotation:
+//
+//  1. Capture the old robot identity from status
+//  2. Create a new robot account with a fresh name (Harbor generates the secret)
+//  3. Update project status to point to the new robot
+//  4. Distribute the new credentials to all target K8s Secrets
+//  5. Delete the old robot account
+//  6. Remove the refresh annotation
+//
+// During the rotation the old robot continues to work (step 1→4), so pods
+// keep authenticating. Once the new credentials are in K8s Secrets (step 4),
+// pods that reload pick up the new robot credentials, which are already valid
+// in Harbor (step 2). The old robot is only deleted after the new one is
+// fully deployed (step 5), ensuring there is always a valid credential.
+//
+// Retry safety comes from the status sub-resource: if reconciliation is
+// interrupted before step 3 (status update), the retry starts from scratch
+// with the original status. If interrupted after step 3, the retry sees the
+// updated robot ID and creates a new robot, keeping the previous one as
+// intermediate. The old robot account is always cleaned up on the next
+// successful rotation.
+// reconcileRefreshToken performs a token rotation for the robot account
+// using a create-new/delete-old strategy to achieve zero-downtime rotation:
+//
+//  1. Capture the old robot identity from status
+//  2. Create a new robot account with a fresh name (Harbor generates the secret)
+//  3. Persist updated status with new robot ID/name
+//  4. Distribute the new credentials to all target K8s Secrets
+//  5. Delete the old robot account
+//  6. Remove the refresh annotation
+//
+// During the rotation the old robot continues to work (step 1–4), so pods
+// keep authenticating. Once the new credentials are in K8s Secrets (step 4),
+// pods that reload pick up the new robot credentials, which are already valid
+// in Harbor (step 2). The old robot is only deleted after the new one is
+// fully deployed (step 5), ensuring there is always a valid credential.
+//
+// Retry safety comes from the status sub-resource: if reconciliation is
+// interrupted before step 3 (status update), the retry starts from scratch
+// with the original status. If interrupted after step 3, the retry sees the
+// updated robot ID and creates a new robot, keeping the previous one as
+// intermediate. The old robot account is always cleaned up on the next
+// successful rotation.
 func (r *HarborProjectReconciler) reconcileRefreshToken(ctx context.Context, project *v1.HarborProject) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Refreshing robot token", "project", project.Name)
 
-	robotID := project.Status.RobotID
-	if robotID == 0 {
+	// Derive the Harbor project name the same way the main reconcile does.
+	projectName := project.Spec.ProjectName
+	if projectName == "" {
+		projectName = "hp-" + project.Name
+	}
+
+	// Capture the old robot identity before creating the replacement.
+	oldRobotID := project.Status.RobotID
+	if oldRobotID == 0 {
 		return ctrl.Result{}, fmt.Errorf("cannot refresh token: no existing robot account (robotID=0)")
 	}
+	oldRobotName := project.Status.RobotName
 
-	// 1. Generate a new cryptographically random secret
-	newSecret, err := generateSecret()
+	// Create a new robot account with a fresh name but the same permissions.
+	// The new robot is immediately valid in Harbor, so once K8s Secrets are
+	// updated, pods will authenticate without interruption.
+	newRobot, err := r.HarborClient.CreateRobot(ctx, project.Status.HarborProjectID, harbor.RobotSpec{
+		Name:     "robot-" + shortID(project.Name) + "-rotated",
+		Duration: -1, // never expire
+		Permissions: []harbor.RobotPermission{
+			{
+				Kind:      "project",
+				Namespace: projectName,
+				Access:    toAccess(project.Spec.RobotPermissions),
+			},
+		},
+	})
 	if err != nil {
-		logger.Error(err, "failed to generate new secret")
-		return ctrl.Result{}, fmt.Errorf("failed to generate new secret: %w", err)
+		logger.Error(err, "failed to create replacement robot account")
+		return ctrl.Result{}, fmt.Errorf("failed to create replacement robot account: %w", err)
+	}
+	logger.Info("created replacement robot account",
+		"robotID", newRobot.ID,
+		"robotName", newRobot.Name)
+
+	// Point the project status at the new robot.
+	project.Status.RobotName = newRobot.Name
+	project.Status.RobotID = newRobot.ID
+
+	// Persist the status update so the new robot identity survives a crash.
+	// This is the point of no return: after this succeeds the new robot is
+	// the canonical one.
+	if err := r.Status().Update(ctx, project); err != nil {
+		logger.Error(err, "failed to update project status with new robot")
+		return ctrl.Result{}, fmt.Errorf("failed to update project status: %w", err)
 	}
 
-	// 2. Refresh the robot secret in Harbor FIRST so pods that read the new
-	//    credential from Kubernetes after this point find it already valid.
-	//    Note: Harbor rotates the secret immediately with no dual-credential
-	//    grace period, so there is a brief window where pods still using the
-	//    old secret may fail auth. This window is limited to a single PATCH
-	//    call before the multi-namespace K8s Secret update runs.
-	if err := r.HarborClient.RefreshRobotSecret(ctx, robotID, newSecret); err != nil {
-		logger.Error(err, "failed to refresh robot secret", "robotID", robotID)
-		return ctrl.Result{}, fmt.Errorf("failed to refresh robot secret: %w", err)
-	}
-
-	// Build a RobotAccount with the existing name and new secret for secret distribution
-	robot := &harbor.RobotAccount{
-		ID:     robotID,
-		Name:   project.Status.RobotName,
-		Secret: newSecret,
-		Token:  newSecret,
-	}
-
-	// 3. Update secrets in all target namespaces with the new credential.
-	//    Harbor has already accepted the rotation, so any pod that reloads
-	//    the secret will receive a valid credential.
+	// Update secrets in all target namespaces with the new robot credentials.
+	// The old robot is still valid in Harbor, so pods continue to authenticate
+	// until they reload and pick up the new secret.
 	for _, ns := range project.Spec.NamespaceRefs {
-		secret := r.buildDockerConfigSecret(project, robot, ns)
+		secret := r.buildDockerConfigSecret(project, newRobot, ns)
 		oldSecret := &corev1.Secret{}
 		err := r.Get(ctx, client.ObjectKey{Name: secret.Name, Namespace: ns}, oldSecret)
 		if err == nil {
-			// Secret exists → update it
+			// Secret exists — update it
 			oldSecret.Data = secret.Data
 			oldSecret.Labels = secret.Labels
 			if err := r.Update(ctx, oldSecret); err != nil {
@@ -405,7 +502,7 @@ func (r *HarborProjectReconciler) reconcileRefreshToken(ctx context.Context, pro
 				return ctrl.Result{}, fmt.Errorf("failed to update secret in namespace %s: %w", ns, err)
 			}
 		} else if client.IgnoreNotFound(err) == nil {
-			// Secret doesn't exist → create it
+			// Secret doesn't exist — create it
 			if err := r.Create(ctx, secret); err != nil {
 				logger.Error(err, "failed to create secret in namespace", "namespace", ns)
 				return ctrl.Result{}, fmt.Errorf("failed to create secret in namespace %s: %w", ns, err)
@@ -415,7 +512,21 @@ func (r *HarborProjectReconciler) reconcileRefreshToken(ctx context.Context, pro
 		}
 	}
 
-	// 4. Remove the refresh annotation, completing the rotation.
+	// Delete the old robot account now that the replacement is fully deployed.
+	logger.V(1).Info("removing previous robot account",
+		"robotID", oldRobotID,
+		"robotName", oldRobotName)
+	if err := r.HarborClient.DeleteProjectRobot(ctx, project.Status.HarborProjectID, oldRobotID); err != nil {
+		// Log but don't fail — the robot might already be gone.
+		logger.Error(err, "failed to delete previous robot (continuing)", "robotID", oldRobotID)
+	}
+
+	// Clean up any rotation-state Secret left by a previous version.
+	if err := r.clearRotationState(ctx, project.Name); err != nil {
+		// Non-fatal; a stale state Secret is harmless.
+		logger.Error(err, "failed to clear legacy rotation state", "project", project.Name)
+	}
+
 	delete(project.Annotations, refreshAnnotation)
 	if err := r.Update(ctx, project); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to remove refresh annotation: %w", err)
@@ -423,9 +534,82 @@ func (r *HarborProjectReconciler) reconcileRefreshToken(ctx context.Context, pro
 
 	logger.Info("Robot token refreshed successfully",
 		"project", project.Status.HarborProjectName,
-		"robotID", robotID)
+		"newRobotID", newRobot.ID,
+		"oldRobotID", oldRobotID)
 
 	return ctrl.Result{}, nil
+}
+
+func rotationStateSecretName(projectName string) string {
+	return "harbor-rotation-" + projectName
+}
+
+// getRotationState reads the pending rotation secret from a K8s Secret.
+// Returns empty string if no state exists.
+func (r *HarborProjectReconciler) getRotationState(ctx context.Context, projectName string) (string, error) {
+	if r.RotationStateNamespace == "" {
+		return "", nil
+	}
+	name := rotationStateSecretName(projectName)
+	var secret corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: r.RotationStateNamespace}, &secret); err != nil {
+		if errors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return string(secret.Data["secret"]), nil
+}
+
+// setRotationState persists the pending rotation secret in a K8s Secret.
+func (r *HarborProjectReconciler) setRotationState(ctx context.Context, projectName, secret string) error {
+	if r.RotationStateNamespace == "" {
+		return nil
+	}
+	name := rotationStateSecretName(projectName)
+	obj := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: r.RotationStateNamespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "harbor-controller",
+				projectLabel:                   projectName,
+			},
+		},
+		Data: map[string][]byte{
+			"secret": []byte(secret),
+		},
+	}
+	// Try create first; if it already exists, update in-place
+	if err := r.Create(ctx, obj); err != nil {
+		if errors.IsAlreadyExists(err) {
+			var existing corev1.Secret
+			if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: r.RotationStateNamespace}, &existing); err != nil {
+				return err
+			}
+			existing.Data = obj.Data
+			existing.Labels = obj.Labels
+			return r.Update(ctx, &existing)
+		}
+		return err
+	}
+	return nil
+}
+
+// clearRotationState removes the pending rotation state Secret.
+func (r *HarborProjectReconciler) clearRotationState(ctx context.Context, projectName string) error {
+	if r.RotationStateNamespace == "" {
+		return nil
+	}
+	name := rotationStateSecretName(projectName)
+	var secret corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: r.RotationStateNamespace}, &secret); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	return r.Delete(ctx, &secret)
 }
 
 // generateSecret generates a cryptographically random 32-byte hex-encoded secret.

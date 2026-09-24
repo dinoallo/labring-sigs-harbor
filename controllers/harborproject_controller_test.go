@@ -310,15 +310,23 @@ func TestReconcile_RefreshToken(t *testing.T) {
 	project.Status.RobotID = 400
 	project.Status.RobotName = "robot$hp-refresh-proj+abc"
 
-	var refreshedRobotID int64
-	var refreshedSecret string
+	var createdProjectID int64
+	var deletedRobotID int64
 	mock := &mockHarborClient{
 		getProjectByNameFn: func(_ context.Context, name string) (*harbor.Project, error) {
 			return &harbor.Project{ProjectID: 55, Name: "hp-refresh-proj"}, nil
 		},
-		refreshRobotSecretFn: func(_ context.Context, robotID int64, secret string) error {
-			refreshedRobotID = robotID
-			refreshedSecret = secret
+		createRobotFn: func(_ context.Context, projectID int64, spec harbor.RobotSpec) (*harbor.RobotAccount, error) {
+			createdProjectID = projectID
+			return &harbor.RobotAccount{
+				ID:     500,
+				Name:   "robot-refresh-proj-rotated",
+				Secret: "new-secret-from-harbor",
+				Token:  "new-secret-from-harbor",
+			}, nil
+		},
+		deleteProjectRobotFn: func(_ context.Context, projectID, robotID int64) error {
+			deletedRobotID = robotID
 			return nil
 		},
 	}
@@ -331,19 +339,24 @@ func TestReconcile_RefreshToken(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify RefreshRobotSecret was called with correct robotID
-	if refreshedRobotID != 400 {
-		t.Errorf("expected robotID 400, got %d", refreshedRobotID)
-	}
-	if refreshedSecret == "" {
-		t.Fatal("expected a non-empty secret to be generated")
+	// Verify CreateRobot was called with correct projectID
+	if createdProjectID != 55 {
+		t.Errorf("expected projectID 55, got %d", createdProjectID)
 	}
 
-	// Verify status unchanged (robot ID/name stays the same)
+	// Verify DeleteProjectRobot was called with old robot ID
+	if deletedRobotID != 400 {
+		t.Errorf("expected deleted robotID 400, got %d", deletedRobotID)
+	}
+
+	// Verify status updated with new robot
 	updated := &v1.HarborProject{}
 	_ = r.Get(context.Background(), types.NamespacedName{Name: "refresh-proj"}, updated)
-	if updated.Status.RobotID != 400 {
-		t.Errorf("expected RobotID to remain 400, got %d", updated.Status.RobotID)
+	if updated.Status.RobotID != 500 {
+		t.Errorf("expected RobotID 500, got %d", updated.Status.RobotID)
+	}
+	if updated.Status.RobotName != "robot-refresh-proj-rotated" {
+		t.Errorf("expected RobotName %q, got %q", "robot-refresh-proj-rotated", updated.Status.RobotName)
 	}
 
 	// Verify refresh annotation removed
@@ -351,7 +364,7 @@ func TestReconcile_RefreshToken(t *testing.T) {
 		t.Fatal("expected refresh annotation to be removed")
 	}
 
-	// Verify secret was updated with new generated secret
+	// Verify secret was updated with new robot credentials
 	secret := &corev1.Secret{}
 	_ = r.Get(context.Background(), types.NamespacedName{Name: "harbor-registry-cred-refresh-proj", Namespace: "ns-1"}, secret)
 
@@ -359,11 +372,11 @@ func TestReconcile_RefreshToken(t *testing.T) {
 	_ = json.Unmarshal(secret.Data[corev1.DockerConfigJsonKey], &dc)
 	auths := dc["auths"].(map[string]interface{})
 	entry := auths["registry.test.sealos.io"].(map[string]interface{})
-	if entry["password"] != refreshedSecret {
-		t.Errorf("expected password %q, got %v", refreshedSecret, entry["password"])
+	if entry["password"] != "new-secret-from-harbor" {
+		t.Errorf("expected password %q, got %v", "new-secret-from-harbor", entry["password"])
 	}
-	if entry["username"] != "robot$hp-refresh-proj+abc" {
-		t.Errorf("expected username %q, got %v", "robot$hp-refresh-proj+abc", entry["username"])
+	if entry["username"] != "robot-refresh-proj-rotated" {
+		t.Errorf("expected username %q, got %v", "robot-refresh-proj-rotated", entry["username"])
 	}
 }
 
