@@ -199,6 +199,27 @@ func (c *Client) DeleteProjectRobot(ctx context.Context, projectID int64, robotI
 	return nil
 }
 
+// RefreshRobotSecret refreshes an existing robot account's secret in-place.
+// This uses the Harbor v2.2+ API: PUT /api/v2.0/robots/{robot_id}
+// The robot ID and name remain unchanged; only the secret is rotated.
+func (c *Client) RefreshRobotSecret(ctx context.Context, robotID int64, secret string) error {
+	body := map[string]string{
+		"secret": secret,
+	}
+	resp, err := c.put(ctx, fmt.Sprintf("/api/v2.0/robots/%d", robotID), body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return &ErrAPIError{StatusCode: resp.StatusCode, Body: string(bodyBytes)}
+	}
+	return nil
+}
+
+
 // --- HTTP Helpers ---
 
 func (c *Client) doRequest(ctx context.Context, method, path string, body interface{}) (*http.Response, error) {

@@ -344,42 +344,43 @@ func (r *HarborProjectReconciler) mapSecretToProject(ctx context.Context, obj cl
 }
 
 // reconcileRefreshToken performs a token rotation for the robot account:
-//  1. Create a new robot → get new token
+//  1. Generate a new secret and refresh the robot in-place via Harbor v2.2+ API
 //  2. Update secrets in all namespaces with new credentials
-//  3. Delete the old robot by ID
-//  4. Update status and remove the refresh annotation
+//  3. Remove the refresh annotation
+//
+// Unlike the old create-new-delete approach, the robot ID/name remain unchanged.
 func (r *HarborProjectReconciler) reconcileRefreshToken(ctx context.Context, project *v1.HarborProject) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Refreshing robot token", "project", project.Name)
 
-	projectID := project.Status.HarborProjectID
-	oldRobotID := project.Status.RobotID
-
-	// 1. Create a new robot (the token is only returned at creation time)
-	projectName := project.Status.HarborProjectName
-	if projectName == "" {
-		projectName = "hp-" + project.Name
+	robotID := project.Status.RobotID
+	if robotID == 0 {
+		return ctrl.Result{}, fmt.Errorf("cannot refresh token: no existing robot account (robotID=0)")
 	}
 
-	newRobot, err := r.HarborClient.CreateRobot(ctx, projectID, harbor.RobotSpec{
-		Name:     "robot-" + shortID(project.Name) + "-refresh",
-		Duration: -1, // never expire
-		Permissions: []harbor.RobotPermission{
-			{
-				Kind:      "project",
-				Namespace: projectName,
-				Access:    toAccess(project.Spec.RobotPermissions),
-			},
-		},
-	})
+	// 1. Generate a new cryptographically random secret and refresh the robot in-place
+	newSecret, err := generateSecret()
 	if err != nil {
-		logger.Error(err, "failed to create new robot for refresh")
-		return ctrl.Result{}, fmt.Errorf("failed to create robot for refresh: %w", err)
+		logger.Error(err, "failed to generate new secret")
+		return ctrl.Result{}, fmt.Errorf("failed to generate new secret: %w", err)
+	}
+
+	if err := r.HarborClient.RefreshRobotSecret(ctx, robotID, newSecret); err != nil {
+		logger.Error(err, "failed to refresh robot secret", "robotID", robotID)
+		return ctrl.Result{}, fmt.Errorf("failed to refresh robot secret: %w", err)
+	}
+
+	// Build a RobotAccount with the existing name and new secret for secret distribution
+	robot := &harbor.RobotAccount{
+		ID:     robotID,
+		Name:   project.Status.RobotName,
+		Secret: newSecret,
+		Token:  newSecret,
 	}
 
 	// 2. Update secrets in all target namespaces with the new credentials
 	for _, ns := range project.Spec.NamespaceRefs {
-		secret := r.buildDockerConfigSecret(project, newRobot, ns)
+		secret := r.buildDockerConfigSecret(project, robot, ns)
 		oldSecret := &corev1.Secret{}
 		err := r.Get(ctx, client.ObjectKey{Name: secret.Name, Namespace: ns}, oldSecret)
 		if err == nil {
@@ -401,39 +402,26 @@ func (r *HarborProjectReconciler) reconcileRefreshToken(ctx context.Context, pro
 		}
 	}
 
-	// 3. Delete the old robot by ID (if we have an old record)
-	//    If the old robot is already gone (e.g. from a previous retry), continue.
-	if oldRobotID > 0 {
-		if err := r.HarborClient.DeleteProjectRobot(ctx, projectID, oldRobotID); err != nil {
-			var apiErr *harbor.ErrAPIError
-			if stderrors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				logger.Info("Old robot already deleted, proceeding", "oldRobotID", oldRobotID)
-			} else {
-				logger.Error(err, "failed to delete old robot", "oldRobotID", oldRobotID)
-				return ctrl.Result{}, fmt.Errorf("failed to delete old robot %d: %w", oldRobotID, err)
-			}
-		}
-	}
-
-	// 4. Update status via status subresource
-	project.Status.RobotName = newRobot.Name
-	project.Status.RobotID = newRobot.ID
-	if err := r.Status().Update(ctx, project); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update status after refresh: %w", err)
-	}
-
-	// Remove the refresh annotation from the main object
+	// 3. Remove the refresh annotation from the main object
 	delete(project.Annotations, refreshAnnotation)
 	if err := r.Update(ctx, project); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to remove refresh annotation: %w", err)
 	}
 
 	logger.Info("Robot token refreshed successfully",
-		"project", projectName,
-		"oldRobotID", oldRobotID,
-		"newRobotID", newRobot.ID)
+		"project", project.Status.HarborProjectName,
+		"robotID", robotID)
 
 	return ctrl.Result{}, nil
+}
+
+// generateSecret generates a cryptographically random 32-byte hex-encoded secret.
+func generateSecret() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to read random bytes: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // --- helpers ---
