@@ -200,13 +200,13 @@ func (c *Client) DeleteProjectRobot(ctx context.Context, projectID int64, robotI
 }
 
 // RefreshRobotSecret refreshes an existing robot account's secret in-place.
-// This uses the Harbor v2.2+ API: PUT /api/v2.0/robots/{robot_id}
+// This uses the Harbor v2.2+ API: PATCH /api/v2.0/robots/{robot_id}
 // The robot ID and name remain unchanged; only the secret is rotated.
 func (c *Client) RefreshRobotSecret(ctx context.Context, robotID int64, secret string) error {
 	body := map[string]string{
 		"secret": secret,
 	}
-	resp, err := c.put(ctx, fmt.Sprintf("/api/v2.0/robots/%d", robotID), body)
+	resp, err := c.patch(ctx, fmt.Sprintf("/api/v2.0/robots/%d", robotID), body)
 	if err != nil {
 		return err
 	}
@@ -263,4 +263,8 @@ func (c *Client) delete(ctx context.Context, path string) (*http.Response, error
 
 func (c *Client) put(ctx context.Context, path string, body interface{}) (*http.Response, error) {
 	return c.doRequest(ctx, http.MethodPut, path, body)
+}
+
+func (c *Client) patch(ctx context.Context, path string, body interface{}) (*http.Response, error) {
+	return c.doRequest(ctx, http.MethodPatch, path, body)
 }

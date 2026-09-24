@@ -418,7 +418,7 @@ func TestDeleteProjectRobot_Error(t *testing.T) {
 
 func TestRefreshRobotSecret_Success(t *testing.T) {
 	client := newMockClient(func(req *http.Request) (int, string) {
-		if req.Method != http.MethodPut {
+		if req.Method != http.MethodPatch {
 			t.Errorf("expected PUT, got %s", req.Method)
 		}
 		if req.URL.Path != "/api/v2.0/robots/42" {
@@ -428,7 +428,7 @@ func TestRefreshRobotSecret_Success(t *testing.T) {
 		var bodyMap map[string]string
 		json.NewDecoder(req.Body).Decode(&bodyMap)
 		if bodyMap["secret"] != "my-new-secret" {
-			t.Errorf("expected secret="my-new-secret", got %q", bodyMap["secret"])
+			t.Errorf(`expected secret="my-new-secret", got %q`, bodyMap["secret"])
 		}
 		return http.StatusOK, ""
 	})

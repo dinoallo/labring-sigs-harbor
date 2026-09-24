@@ -168,7 +168,7 @@ func handleProjectByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.Method {
-	case http.MethodPut:
+	case http.MethodPatch:
 		// PUT /api/v2.0/projects/{id} — update project metadata
 		var req struct {
 			StorageLimit int64                  `json:"storage_limit"`
@@ -292,7 +292,7 @@ func handleRobotByID(w http.ResponseWriter, r *http.Request) {
 	var foundRobot *robotAccount
 	var foundProjectID int64
 	for pid, robots := range globalStore.robots {
-		for _, rbt := range robots
+		for _, rbt := range robots {
 			if rbt.ID == robotID {
 				foundRobot = rbt
 				foundProjectID = pid

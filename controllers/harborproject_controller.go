@@ -358,16 +358,11 @@ func (r *HarborProjectReconciler) reconcileRefreshToken(ctx context.Context, pro
 		return ctrl.Result{}, fmt.Errorf("cannot refresh token: no existing robot account (robotID=0)")
 	}
 
-	// 1. Generate a new cryptographically random secret and refresh the robot in-place
+	// 1. Generate a new cryptographically random secret
 	newSecret, err := generateSecret()
 	if err != nil {
 		logger.Error(err, "failed to generate new secret")
 		return ctrl.Result{}, fmt.Errorf("failed to generate new secret: %w", err)
-	}
-
-	if err := r.HarborClient.RefreshRobotSecret(ctx, robotID, newSecret); err != nil {
-		logger.Error(err, "failed to refresh robot secret", "robotID", robotID)
-		return ctrl.Result{}, fmt.Errorf("failed to refresh robot secret: %w", err)
 	}
 
 	// Build a RobotAccount with the existing name and new secret for secret distribution
@@ -378,7 +373,9 @@ func (r *HarborProjectReconciler) reconcileRefreshToken(ctx context.Context, pro
 		Token:  newSecret,
 	}
 
-	// 2. Update secrets in all target namespaces with the new credentials
+	// 2. Update secrets in all target namespaces FIRST.
+	//    This ensures pods get the new credential while Harbor still accepts the old one,
+	//    eliminating the auth outage window.
 	for _, ns := range project.Spec.NamespaceRefs {
 		secret := r.buildDockerConfigSecret(project, robot, ns)
 		oldSecret := &corev1.Secret{}
@@ -402,7 +399,13 @@ func (r *HarborProjectReconciler) reconcileRefreshToken(ctx context.Context, pro
 		}
 	}
 
-	// 3. Remove the refresh annotation from the main object
+	// 3. Refresh the robot secret in Harbor (now that K8s secrets are already updated)
+	if err := r.HarborClient.RefreshRobotSecret(ctx, robotID, newSecret); err != nil {
+		logger.Error(err, "failed to refresh robot secret", "robotID", robotID)
+		return ctrl.Result{}, fmt.Errorf("failed to refresh robot secret: %w", err)
+	}
+
+	// 4. Remove the refresh annotation from the main object
 	delete(project.Annotations, refreshAnnotation)
 	if err := r.Update(ctx, project); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to remove refresh annotation: %w", err)
