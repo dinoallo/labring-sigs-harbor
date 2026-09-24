@@ -419,7 +419,7 @@ func TestDeleteProjectRobot_Error(t *testing.T) {
 func TestRefreshRobotSecret_Success(t *testing.T) {
 	client := newMockClient(func(req *http.Request) (int, string) {
 		if req.Method != http.MethodPatch {
-			t.Errorf("expected PUT, got %s", req.Method)
+			t.Errorf("expected PATCH, got %s", req.Method)
 		}
 		if req.URL.Path != "/api/v2.0/robots/42" {
 			t.Errorf("expected /api/v2.0/robots/42, got %s", req.URL.Path)
