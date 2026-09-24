@@ -344,11 +344,15 @@ func (r *HarborProjectReconciler) mapSecretToProject(ctx context.Context, obj cl
 }
 
 // reconcileRefreshToken performs a token rotation for the robot account:
-//  1. Generate a new secret and refresh the robot in-place via Harbor v2.2+ API
-//  2. Update secrets in all namespaces with new credentials
-//  3. Remove the refresh annotation
+//  1. Reuse or generate a new secret and persist it in status
+//  2. Refresh the robot in-place via Harbor v2.2+ API (PATCH)
+//  3. Update secrets in all namespaces with new credentials
+//  4. Remove the refresh annotation, then clear pending secret from status
 //
 // Unlike the old create-new-delete approach, the robot ID/name remain unchanged.
+// The pending secret is persisted in Status so retries reuse the same secret
+// instead of generating a fresh one that would invalidate credentials already
+// written to Kubernetes.
 func (r *HarborProjectReconciler) reconcileRefreshToken(ctx context.Context, project *v1.HarborProject) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Refreshing robot token", "project", project.Name)
@@ -358,11 +362,30 @@ func (r *HarborProjectReconciler) reconcileRefreshToken(ctx context.Context, pro
 		return ctrl.Result{}, fmt.Errorf("cannot refresh token: no existing robot account (robotID=0)")
 	}
 
-	// 1. Generate a new cryptographically random secret
-	newSecret, err := generateSecret()
-	if err != nil {
-		logger.Error(err, "failed to generate new secret")
-		return ctrl.Result{}, fmt.Errorf("failed to generate new secret: %w", err)
+	// 1. Reuse pending secret if available (retry after partial failure), otherwise generate one.
+	newSecret := project.Status.PendingSecret
+	if newSecret == "" {
+		var err error
+		newSecret, err = generateSecret()
+		if err != nil {
+			logger.Error(err, "failed to generate new secret")
+			return ctrl.Result{}, fmt.Errorf("failed to generate new secret: %w", err)
+		}
+		// Persist the pending secret so retries reuse it.
+		project.Status.PendingSecret = newSecret
+		if err := r.Status().Update(ctx, project); err != nil {
+			logger.Error(err, "failed to persist pending secret in status")
+			return ctrl.Result{}, fmt.Errorf("failed to persist pending secret: %w", err)
+		}
+	}
+
+	// 2. Refresh the robot secret in Harbor FIRST so pods that read the new
+	//    credential from Kubernetes after this point find it already valid.
+	//    Harbor v2.2+ keeps the old credential valid during the rotation window,
+	//    so existing pods continue to authenticate with the old secret.
+	if err := r.HarborClient.RefreshRobotSecret(ctx, robotID, newSecret); err != nil {
+		logger.Error(err, "failed to refresh robot secret", "robotID", robotID)
+		return ctrl.Result{}, fmt.Errorf("failed to refresh robot secret: %w", err)
 	}
 
 	// Build a RobotAccount with the existing name and new secret for secret distribution
@@ -373,9 +396,9 @@ func (r *HarborProjectReconciler) reconcileRefreshToken(ctx context.Context, pro
 		Token:  newSecret,
 	}
 
-	// 2. Update secrets in all target namespaces FIRST.
-	//    This ensures pods get the new credential while Harbor still accepts the old one,
-	//    eliminating the auth outage window.
+	// 3. Update secrets in all target namespaces with the new credential.
+	//    Harbor has already accepted the rotation, so any pod that reloads
+	//    the secret will receive a valid credential.
 	for _, ns := range project.Spec.NamespaceRefs {
 		secret := r.buildDockerConfigSecret(project, robot, ns)
 		oldSecret := &corev1.Secret{}
@@ -399,16 +422,19 @@ func (r *HarborProjectReconciler) reconcileRefreshToken(ctx context.Context, pro
 		}
 	}
 
-	// 3. Refresh the robot secret in Harbor (now that K8s secrets are already updated)
-	if err := r.HarborClient.RefreshRobotSecret(ctx, robotID, newSecret); err != nil {
-		logger.Error(err, "failed to refresh robot secret", "robotID", robotID)
-		return ctrl.Result{}, fmt.Errorf("failed to refresh robot secret: %w", err)
-	}
-
-	// 4. Remove the refresh annotation from the main object
+	// 4. Remove the refresh annotation first, then clear the pending secret.
+	//    Removing the annotation before clearing the pending secret ensures that
+	//    if the annotation update fails, the pending secret is preserved and the
+	//    next retry reuses the same secret instead of generating a fresh one.
 	delete(project.Annotations, refreshAnnotation)
 	if err := r.Update(ctx, project); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to remove refresh annotation: %w", err)
+	}
+
+	project.Status.PendingSecret = ""
+	if err := r.Status().Update(ctx, project); err != nil {
+		logger.Error(err, "failed to clear pending secret from status")
+		return ctrl.Result{}, fmt.Errorf("failed to clear pending secret: %w", err)
 	}
 
 	logger.Info("Robot token refreshed successfully",

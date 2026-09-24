@@ -66,6 +66,7 @@ type HarborProjectStatus struct {
 	HarborProjectName  string             `json:"harborProjectName,omitempty"`
 	RobotName          string             `json:"robotName,omitempty"`
 	RobotID            int64              `json:"robotID,omitempty"`
+	PendingSecret string `json:"pendingSecret,omitempty"`
 	Owner              string             `json:"owner,omitempty"`
 	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
 	// LastSpecHash is a hash of namespaceRefs and robotPermissions from the last
