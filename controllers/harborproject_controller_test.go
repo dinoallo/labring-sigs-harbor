@@ -27,7 +27,6 @@ type harborClient interface {
 	CreateProject(ctx context.Context, spec harbor.ProjectSpec) (int64, error)
 	UpdateProject(ctx context.Context, projectID int64, spec harbor.ProjectSpec) error
 	CreateRobot(ctx context.Context, projectID int64, spec harbor.RobotSpec) (*harbor.RobotAccount, error)
-	RefreshRobotSecret(ctx context.Context, robotID int64, secret string) error
 	DeleteProjectRobot(ctx context.Context, projectID, robotID int64) error
 	DeleteProject(ctx context.Context, projectID int64) error
 }
@@ -37,13 +36,12 @@ type harborClient interface {
 var _ harborClient = (*harbor.Client)(nil)
 
 type mockHarborClient struct {
-	getProjectByNameFn    func(ctx context.Context, name string) (*harbor.Project, error)
-	createProjectFn       func(ctx context.Context, spec harbor.ProjectSpec) (int64, error)
-	updateProjectFn       func(ctx context.Context, projectID int64, spec harbor.ProjectSpec) error
-	createRobotFn         func(ctx context.Context, projectID int64, spec harbor.RobotSpec) (*harbor.RobotAccount, error)
-	refreshRobotSecretFn  func(ctx context.Context, robotID int64, secret string) error
-	deleteProjectRobotFn  func(ctx context.Context, projectID, robotID int64) error
-	deleteProjectFn       func(ctx context.Context, projectID int64) error
+	getProjectByNameFn   func(ctx context.Context, name string) (*harbor.Project, error)
+	createProjectFn      func(ctx context.Context, spec harbor.ProjectSpec) (int64, error)
+	updateProjectFn      func(ctx context.Context, projectID int64, spec harbor.ProjectSpec) error
+	createRobotFn        func(ctx context.Context, projectID int64, spec harbor.RobotSpec) (*harbor.RobotAccount, error)
+	deleteProjectRobotFn func(ctx context.Context, projectID, robotID int64) error
+	deleteProjectFn      func(ctx context.Context, projectID int64) error
 }
 
 func (m *mockHarborClient) GetProjectByName(ctx context.Context, name string) (*harbor.Project, error) {
@@ -63,9 +61,6 @@ func (m *mockHarborClient) DeleteProjectRobot(ctx context.Context, projectID, ro
 }
 func (m *mockHarborClient) DeleteProject(ctx context.Context, projectID int64) error {
 	return m.deleteProjectFn(ctx, projectID)
-}
-func (m *mockHarborClient) RefreshRobotSecret(ctx context.Context, robotID int64, secret string) error {
-	return m.refreshRobotSecretFn(ctx, robotID, secret)
 }
 
 // ---------------------------------------------------------------------------
@@ -591,14 +586,13 @@ func TestReconcile_UpdateProjectProperties(t *testing.T) {
 	}
 }
 
-
 func TestReconcile_UpdatePublicAutoScan_NoRobotRotation(t *testing.T) {
 	project := fakeProject("meta-sync", string(v1.HarborPhaseReady), true)
 	project.Generation = 2
 	project.Status.HarborProjectID = 77
 	project.Status.HarborProjectName = "hp-meta-sync"
-	project.Status.RobotID = 88       // already has a robot
-	project.Status.ObservedGeneration = 0 // stale, force reconcile
+	project.Status.RobotID = 88                      // already has a robot
+	project.Status.ObservedGeneration = 0            // stale, force reconcile
 	project.Status.LastSpecHash = "b2f53f2fa22fd8fa" // matches default namespaceRefs+robotPermissions from fakeProject
 	project.Spec.Public = true
 	project.Spec.AutoScan = true
@@ -662,9 +656,6 @@ func TestReconcile_UpdatePublicAutoScan_NoRobotRotation(t *testing.T) {
 	}
 }
 
-
-
-
 func TestReconcile_UpdatePublicAutoScan_NotReadyStillRotates(t *testing.T) {
 	// If project is not Ready (e.g. recovering from a failed secret distribution),
 	// the controller should still perform full reconciliation (including robot creation)
@@ -673,8 +664,8 @@ func TestReconcile_UpdatePublicAutoScan_NotReadyStillRotates(t *testing.T) {
 	project.Generation = 2
 	project.Status.HarborProjectID = 77
 	project.Status.HarborProjectName = "hp-meta-sync-recover"
-	project.Status.RobotID = 88       // has a robot from a previous attempt
-	project.Status.ObservedGeneration = 0 // stale, force reconcile
+	project.Status.RobotID = 88                      // has a robot from a previous attempt
+	project.Status.ObservedGeneration = 0            // stale, force reconcile
 	project.Status.LastSpecHash = "03737f7570ba8bdb" // hash matches, but wasReady is false so still goes through full flow
 	project.Spec.Public = true
 	project.Spec.AutoScan = true
@@ -766,13 +757,12 @@ func TestReconcile_UpdatePublicAutoScan_HashMismatchStillRotates(t *testing.T) {
 	}
 }
 
-
 func TestReconcile_FastPath_ProjectIDChanged(t *testing.T) {
 	// If Harbor deleted and recreated the project (different ProjectID with same name),
 	// the fast path must NOT be taken even if everything else matches.
 	project := fakeProject("project-id-change", string(v1.HarborPhaseReady), true)
 	project.Generation = 2
-	project.Status.HarborProjectID = 77  // old ID
+	project.Status.HarborProjectID = 77 // old ID
 	project.Status.HarborProjectName = "hp-project-id-change"
 	project.Status.RobotID = 88
 	project.Status.ObservedGeneration = 0
@@ -827,7 +817,7 @@ func TestReconcile_ExistingSecretsUpdated(t *testing.T) {
 	project.Generation = 2
 	project.Status.HarborProjectID = 42
 	project.Status.HarborProjectName = "hp-existing-secret"
-	project.Status.RobotID = 0  // no previous robot → full flow
+	project.Status.RobotID = 0 // no previous robot → full flow
 	project.Status.ObservedGeneration = 0
 	project.Spec.Public = true
 
@@ -894,6 +884,7 @@ func TestReconcile_ExistingSecretsUpdated(t *testing.T) {
 		t.Error("expected secret data to be updated with new token")
 	}
 }
+
 // ---------------------------------------------------------------------------
 // Helper tests
 // ---------------------------------------------------------------------------

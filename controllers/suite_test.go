@@ -179,10 +179,6 @@ func (m *mockIntegrationHarborClient) DeleteProjectRobot(_ context.Context, proj
 	return nil
 }
 
-func (m *mockIntegrationHarborClient) RefreshRobotSecret(_ context.Context, robotID int64, secret string) error {
-	return nil
-}
-
 func (m *mockIntegrationHarborClient) DeleteProject(_ context.Context, projectID int64) error {
 	if m.projects == nil {
 		return nil
