@@ -818,9 +818,72 @@ subjects:
   namespace: harbor-system
 ```
 
+
+### 4.8 Project Auto-Provision (Optional Controller)
+
+`ProjectAutoProvision` is an **optional** controller that watches Namespace create/update events and automatically creates corresponding `HarborProject` CRs for Namespaces with a designated owner label, providing an "Namespace creation comes with image repository" automated experience.
+
+#### Enable
+
+Pass the `--enable-project-auto-provision` flag when starting the controller:
+
+```bash
+manager --enable-project-auto-provision --owner-label-key="user.sealos.io/owner"
+```
+
+#### How It Works
+
+```
+┌─────────────────┐     ┌──────────────────────────────┐     ┌──────────────────────┐
+│  Namespace       │     │  ProjectAutoProvision         │     │  HarborProject        │
+│  Changes         │     │  Reconciler                    │     │  Reconciler           │
+│                  │     │                              │     │                      │
+│  Create/Update   │────▶│  1. Read Namespace            │────▶│  (Standard Flow)      │
+│  Label Change    │     │  2. Check owner label         │     │  Create Project       │
+│                  │     │  3. Create/Update HP CR       │     │  Create Robot         │
+│                  │     │  4. Label mgmt (record NS UID)│     │  Distribute Secret    │
+└─────────────────┘     └──────────────────────────────┘     └──────────────────────┘
+```
+
+1. User creates a Namespace with an owner label (e.g. `user.sealos.io/owner: user-abc`)
+2. `ProjectAutoProvision` detects the label change and generates a corresponding `HarborProject` CR (name format `hp-{namespace}`)
+3. `HarborProjectReconciler` takes over and executes the standard Project/Robot/Secret creation flow
+
+#### Label Conventions
+
+Auto-created `HarborProject` CRs carry the following labels to distinguish them from manually created resources:
+
+| Label | Description |
+|-------|-------------|
+| `harbor.sealos.io/auto-provision` | Marks as auto-provisioned, value `"true"` |
+| `harbor.sealos.io/source-namespace` | Source Namespace name |
+| `harbor.sealos.io/source-namespace-uid` | Source Namespace UID, used for rebuild detection |
+
+#### Namespace Rebuild Detection
+
+If a Namespace is deleted and recreated (same name but different UID), the controller detects the UID change via the `source-namespace-uid` label and re-matches and updates the `HarborProject` spec to ensure the new Namespace is correctly adopted.
+
+#### Default Configuration
+
+Auto-created `HarborProject` uses the following defaults:
+
+- **ProjectName**: Namespace name (short name, not `hp-` prefix)
+- **StorageLimit**: 5 GB
+- **Public**: false
+- **AutoScan**: false
+- **RobotPermissions**: push + pull
+- **NamespaceRefs**: only the source Namespace itself
+
+#### Relationship with Manual Creation
+
+- If a `HarborProject` has already been created manually, `ProjectAutoProvision` will not create a duplicate when it finds an existing CR with the same name. Instead, it will **adopt** the CR: update its spec to match the current Namespace label configuration and supplement the auto-provision labels.
+- Deleting an auto-created `HarborProject` CR will **not** trigger automatic recreation (unless the Namespace change event is re-triggered after manual deletion).
+- Removing the owner label from a Namespace will **not** trigger deletion of existing CRs — this is intentional to avoid accidental deletion.
+
 ---
 
 ## 5. Harbor Deployment
+
 
 ### 5.1 Authentication Mode
 
@@ -1083,12 +1146,13 @@ harbor_controller_operation_total{operation="create_project", status="success"}
 ### Phase 1: Basic Integration
 
 - [ ] Harbor Helm Chart deployment (configure db_auth + S3 storage)
-- [ ] CRD definition + code generation (HarborProject CRD, deepcopy)
-- [ ] Harbor Admin Client (`internal/harbor/client.go`)
-- [ ] Reconciler core logic (create Project → Robot → distribute Secrets via namespaceRefs; reverse cleanup on delete)
+- [x] CRD definition + code generation (HarborProject CRD, deepcopy)
+- [x] Harbor Admin Client (`internal/harbor/client.go`)
+- [x] Reconciler core logic (create Project → Robot → distribute Secrets via namespaceRefs; reverse cleanup on delete)
 - [x] Robot Token refresh via `harbor.sealos.io/refresh-token` annotation (create new → update secrets → delete old)
-- [ ] RBAC + deployment configuration (ServiceAccount, ClusterRole, Deployment)
+- [x] RBAC + deployment configuration (ServiceAccount, ClusterRole, Deployment)
 - [ ] End-to-end testing (create → push → pull → delete full workflow)
+- [x] Project Auto-Provision controller (auto-create HarborProject CR from Namespace)
 
 ### Phase 2: Metering & Billing
 
