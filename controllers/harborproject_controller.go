@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"net/http"
+	"sort"
 
 	stderrors "errors"
 	corev1 "k8s.io/api/core/v1"
@@ -85,6 +88,8 @@ func (r *HarborProjectReconciler) reconcileCreate(ctx context.Context, project *
 		return ctrl.Result{}, nil
 	}
 
+	// Capture whether the project was Ready before we modify the phase below.
+	wasReady := project.Status.Phase == v1.HarborPhaseReady
 	// Set phase to Creating
 	project.Status.Phase = v1.HarborPhaseCreating
 	if err := r.Status().Update(ctx, project); err != nil {
@@ -134,8 +139,25 @@ func (r *HarborProjectReconciler) reconcileCreate(ctx context.Context, project *
 			_ = r.Status().Update(ctx, project)
 			return ctrl.Result{}, fmt.Errorf("failed to update harbor project: %w", err)
 		}
+		// Capture the previous Harbor project ID before overwriting it,
+		// so we can detect if Harbor deleted and recreated the project.
+		prevHarborProjectID := project.Status.HarborProjectID
 		project.Status.HarborProjectID = hbProject.ProjectID
 		project.Status.HarborProjectName = hbProject.Name
+
+		// If the project was previously ready, has a robot account, the
+		// full-flow fields haven't changed, and the Harbor project identity
+		// is unchanged, skip robot/secret recreation. This handles the common
+		// case where a user changes public/autoScan/storageLimit on an existing
+		// project.
+		if wasReady && project.Status.RobotID > 0 && project.Status.LastSpecHash == computeSpecHash(projectName, project.Spec.NamespaceRefs, project.Spec.RobotPermissions) && prevHarborProjectID == hbProject.ProjectID {
+			project.Status.Phase = v1.HarborPhaseReady
+			project.Status.ObservedGeneration = project.Generation
+			logger.Info("HarborProject metadata synced to Harbor",
+				"project", projectName,
+				"id", project.Status.HarborProjectID)
+			return ctrl.Result{}, r.Status().Update(ctx, project)
+		}
 	}
 
 	// Capture the previous robot ID before overwriting it with the new one.
@@ -178,7 +200,15 @@ func (r *HarborProjectReconciler) reconcileCreate(ctx context.Context, project *
 				existing.Labels = secret.Labels
 				if updateErr := r.Update(ctx, existing); updateErr != nil {
 					logger.Error(updateErr, "failed to update existing secret in namespace", "namespace", ns)
+					project.Status.Phase = v1.HarborPhaseFailed
+					_ = r.Status().Update(ctx, project)
+					return ctrl.Result{}, fmt.Errorf("failed to update secret in namespace %s: %w", ns, updateErr)
 				}
+			} else {
+				logger.Error(getErr, "failed to get existing secret in namespace", "namespace", ns)
+				project.Status.Phase = v1.HarborPhaseFailed
+				_ = r.Status().Update(ctx, project)
+				return ctrl.Result{}, fmt.Errorf("failed to get existing secret in namespace %s: %w", ns, getErr)
 			}
 		}
 	}
@@ -194,6 +224,10 @@ func (r *HarborProjectReconciler) reconcileCreate(ctx context.Context, project *
 			logger.Error(err, "failed to delete previous robot (continuing)", "robotID", oldRobotID)
 		}
 	}
+
+	// Compute and store the hash of full-flow fields for fast-path detection
+	// on subsequent reconciliations.
+	project.Status.LastSpecHash = computeSpecHash(projectName, project.Spec.NamespaceRefs, project.Spec.RobotPermissions)
 
 	// Mark as Ready
 	project.Status.Phase = v1.HarborPhaseReady
@@ -443,6 +477,41 @@ func setCondition(conditions *[]metav1.Condition, condType string, status metav1
 			Message:            message,
 		})
 	}
+}
+
+// computeSpecHash returns a deterministic hash of the fields that require full
+// reconciliation (namespaceRefs, robotPermissions). When this hash matches the
+// stored value in project.Status.LastSpecHash, only metadata fields
+// (public/autoScan/storageLimit) have changed and the fast path can be taken.
+func computeSpecHash(projectName string, namespaceRefs []string, robotPermissions []v1.RobotPermission) string {
+	h := fnv.New64a()
+	buf := make([]byte, 4)
+	// Write projectName with length prefix so that the empty string and
+	// missing are distinct from any other input.
+	binary.LittleEndian.PutUint32(buf, uint32(len(projectName)))
+	h.Write(buf)
+	h.Write([]byte(projectName))
+	// Write namespaceRefs with length prefix, each item also length-prefixed.
+	sorted := append([]string{}, namespaceRefs...)
+	sort.Strings(sorted)
+	binary.LittleEndian.PutUint32(buf, uint32(len(sorted)))
+	h.Write(buf)
+	for _, ns := range sorted {
+		binary.LittleEndian.PutUint32(buf, uint32(len(ns)))
+		h.Write(buf)
+		h.Write([]byte(ns))
+	}
+	// Write robotPermissions with length prefix, each action also length-prefixed.
+	perms := append([]v1.RobotPermission{}, robotPermissions...)
+	sort.Slice(perms, func(i, j int) bool { return perms[i].Action < perms[j].Action })
+	binary.LittleEndian.PutUint32(buf, uint32(len(perms)))
+	h.Write(buf)
+	for _, p := range perms {
+		binary.LittleEndian.PutUint32(buf, uint32(len(p.Action)))
+		h.Write(buf)
+		h.Write([]byte(p.Action))
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 // shortID generates a short random ID for robot account naming
