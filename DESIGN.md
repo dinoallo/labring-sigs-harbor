@@ -693,19 +693,19 @@ func (c *Client) CreateProject(ctx context.Context, spec ProjectSpec) (int64, er
 }
 
 func (c *Client) GetProjectByName(ctx context.Context, name string) (*Project, error) {
-    resp, err := c.get(ctx, fmt.Sprintf("/api/v2.0/projects?name=%s", url.QueryEscape(name)))
+    project, err := c.getProjectByPath(ctx, fmt.Sprintf("/api/v2.0/projects/%s", url.PathEscape(name)))
     if err != nil {
         return nil, err
     }
-    defer resp.Body.Close()
-    var projects []Project
-    if err := json.NewDecoder(resp.Body).Decode(&projects); err != nil {
-        return nil, err
+    if project != nil && project.Name == name {
+        return project, nil
     }
-    if len(projects) == 0 {
+    // Harbor treats all-numeric path values as project IDs. Numeric project
+    // names fall back to q=name=<value> and require an exact response match.
+    if !isNumericProjectName(name) {
         return nil, nil
     }
-    return &projects[0], nil
+    return c.findProjectByExactQuery(ctx, name)
 }
 
 func (c *Client) DeleteProject(ctx context.Context, projectID int64) error {

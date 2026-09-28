@@ -69,9 +69,51 @@ func (c *Client) CreateProject(ctx context.Context, spec ProjectSpec) (int64, er
 	return id, nil
 }
 
-// GetProjectByName retrieves a project by its name. Returns nil if not found.
+// GetProjectByName retrieves a project by its exact name. Returns nil if not found.
 func (c *Client) GetProjectByName(ctx context.Context, name string) (*Project, error) {
-	resp, err := c.get(ctx, fmt.Sprintf("/api/v2.0/projects?name=%s", url.QueryEscape(name)))
+	project, err := c.getProjectByPath(ctx, fmt.Sprintf("/api/v2.0/projects/%s", url.PathEscape(name)))
+	if err != nil {
+		return nil, err
+	}
+	if project != nil && project.Name == name {
+		return project, nil
+	}
+
+	// Harbor treats all-numeric path values as project IDs. Fall back to the
+	// exact q filter for numeric project names and require an exact response match.
+	if !isNumericProjectName(name) {
+		return nil, nil
+	}
+	return c.findProjectByExactQuery(ctx, name)
+}
+
+func (c *Client) getProjectByPath(ctx context.Context, path string) (*Project, error) {
+	resp, err := c.get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, &ErrAPIError{StatusCode: resp.StatusCode, Body: string(bodyBytes)}
+	}
+
+	var project Project
+	if err := json.NewDecoder(resp.Body).Decode(&project); err != nil {
+		return nil, fmt.Errorf("harbor: failed to decode project: %w", err)
+	}
+	return &project, nil
+}
+
+func (c *Client) findProjectByExactQuery(ctx context.Context, name string) (*Project, error) {
+	params := url.Values{}
+	params.Set("q", "name="+name)
+
+	resp, err := c.get(ctx, "/api/v2.0/projects?"+params.Encode())
 	if err != nil {
 		return nil, err
 	}
@@ -86,10 +128,24 @@ func (c *Client) GetProjectByName(ctx context.Context, name string) (*Project, e
 	if err := json.NewDecoder(resp.Body).Decode(&projects); err != nil {
 		return nil, fmt.Errorf("harbor: failed to decode projects list: %w", err)
 	}
-	if len(projects) == 0 {
-		return nil, nil
+	for i := range projects {
+		if projects[i].Name == name {
+			return &projects[i], nil
+		}
 	}
-	return &projects[0], nil
+	return nil, nil
+}
+
+func isNumericProjectName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // DeleteProject deletes a Harbor project by ID
